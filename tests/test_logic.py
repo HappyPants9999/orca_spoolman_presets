@@ -11,10 +11,6 @@ def cand(name, rank, bundle_id=""):
     return {"name": name, "base": osp.base_name(name, bundle_id), "rank": rank}
 
 
-def system(name, vendor, ftype, is_global=True):
-    return {"name": name, "base": osp.base_name(name), "vendor": vendor, "type": ftype, "global": is_global}
-
-
 CANDIDATES = [
     cand("Sunlu HS PLA+", osp.RANK_USER),
     cand("Sunlu HS PLA+ 2.0", osp.RANK_USER),
@@ -29,17 +25,6 @@ CANDIDATES = [
     cand("SUNLU PLA+ @System", osp.RANK_SYSTEM),
     cand("Generic PLA @System", osp.RANK_SYSTEM),
 ]
-
-SYSTEMS = [
-    system("SUNLU PLA+ 2.0 @System", "SUNLU", "PLA"),
-    system("SUNLU PLA+ @System", "SUNLU", "PLA"),
-    system("SUNLU PETG @FF AD5M", "SUNLU", "PETG", is_global=False),
-    system("Generic PLA @System", "Generic", "PLA"),
-    system("Generic PLA High Speed @System", "Generic", "PLA"),
-    system("Generic PETG @System", "Generic", "PETG"),
-    system("Generic PLA+ @System", "Generic", "PLA+"),
-]
-
 
 def best(vendor, material, name):
     found = osp.match_preset(osp.spool_keys(vendor, material, name), CANDIDATES)
@@ -83,75 +68,91 @@ class MatchTest(unittest.TestCase):
         self.assertIsNone(osp.find_named_preset("Deleted PLA", CANDIDATES))
 
 
-class LineTest(unittest.TestCase):
-    def test_proposed_lines(self):
-        cases = [
-            ("HS PLA+ 2.0 Olive Green", "PLA+", "HS PLA+ 2.0"),
-            ("PLA-Meta Cherry Red", "PLA", "PLA-Meta"),
-            ("Silk PLA+ Light Gold", "PLA+", "Silk PLA+"),
-            ("Soleyin Ultra PLA Strawberry Milk", "PLA", "Soleyin Ultra PLA"),
-            ("SnapSpeed PLA Blue Gray", "PLA", "SnapSpeed PLA"),
-            ("Matte Beige", "PLA", "PLA Matte"),
-            ("Black", "PLA+", "PLA+"),
-            ("Fluorescent PLA Green", "PLA", "Fluorescent PLA"),
-            ("Silk Gold-Copper-Blue", "PLA", "PLA Silk"),
-        ]
-        for name, material, expected in cases:
-            self.assertEqual(osp.propose_line(name, material), expected, name)
+PIP = [
+    {"spool_id": 42, "name": "(#42) PLA Galaxy Blue - Overture - PipSpool", "base": "(#42) PLA Galaxy Blue - Overture - PipSpool",
+     "rank": osp.RANK_USER, "usable": True},
+    {"spool_id": 7, "name": "(#7) ASA Black - Polymaker - PipSpool", "base": "(#7) ASA Black - Polymaker - PipSpool",
+     "rank": osp.RANK_USER, "usable": False},
+]
+SNAP = {"candidates": CANDIDATES + [{"name": PIP[0]["name"], "base": PIP[0]["base"], "rank": osp.RANK_USER}],
+        "pipspool": PIP, "slots": ["Generic PLA @System"] * 4}
 
 
-class ParentTest(unittest.TestCase):
-    def test_vendor_preset_sharing_most_words(self):
-        self.assertEqual(osp.choose_parent("Sunlu", "PLA", "Sunlu HS PLA+ 2.0", SYSTEMS)["name"],
-                         "SUNLU PLA+ 2.0 @System")
+class PipSpoolTest(unittest.TestCase):
+    def test_spool_id_from_names(self):
+        self.assertEqual(osp.pipspool_spool_id("(#42) PLA Galaxy Blue - Overture - PipSpool"), 42)
+        self.assertEqual(osp.pipspool_spool_id("PETG Black (#9) - Spoolman"), 9)           # older suffix
+        self.assertEqual(osp.pipspool_spool_id("(#5) PLA Red - X - PipSpool @Sovol SV08"), 5)
+        for name in ("(#5) PLA Red", "PLA - PipSpool", "(#1) (#2) - PipSpool", "(#0) x - PipSpool", "", None):
+            self.assertIsNone(osp.pipspool_spool_id(name), name)
 
-    def test_generic_for_unknown_vendor(self):
-        self.assertEqual(osp.choose_parent("Jayo", "PLA", "Jayo PLA", SYSTEMS)["name"], "Generic PLA @System")
-        self.assertEqual(osp.choose_parent("Jayo", "PLA+", "Jayo PLA+", SYSTEMS)["name"], "Generic PLA+ @System")
+    def test_pipspool_beats_name_match(self):
+        spool = {"filament": {"name": "HS PLA+ White", "material": "PLA", "vendor": {"name": "Sunlu"}}}
+        cand, how, _ = osp.choose_preset(42, spool, SNAP)
+        self.assertEqual((cand["name"], how), (PIP[0]["name"], "PipSpool"))
 
-    def test_global_vendor_preset_preferred(self):
-        systems = SYSTEMS + [system("SUNLU PETG @System", "SUNLU", "PETG")]
-        self.assertEqual(osp.choose_parent("Sunlu", "PETG", "Sunlu PETG", systems)["name"], "SUNLU PETG @System")
+    def test_orca_preset_override_beats_pipspool(self):
+        spool = {"extra": {"orca_preset": '"Sunlu HS PLA+"'}, "filament": {}}
+        cand, how, _ = osp.choose_preset(42, spool, SNAP)
+        self.assertEqual((cand["name"], how), ("Sunlu HS PLA+", "orca_preset"))
 
-    def test_printer_specific_vendor_preset_loses_to_generic(self):
-        systems = SYSTEMS + [system("Snapmaker PLA SnapSpeed @U1", "Snapmaker", "PLA", is_global=False)]
-        self.assertEqual(osp.choose_parent("Snapmaker", "PLA", "Snapmaker SnapSpeed PLA", systems)["name"],
-                         "Generic PLA @System")
-        only = [system("Snapmaker PLA SnapSpeed @U1", "Snapmaker", "PLA", is_global=False)]
-        self.assertEqual(osp.choose_parent("Snapmaker", "PLA", "Snapmaker SnapSpeed PLA", only)["name"],
-                         "Snapmaker PLA SnapSpeed @U1")
+    def test_incompatible_pipspool_profile_is_reported_not_guessed(self):
+        spool = {"filament": {"name": "HS PLA+ White", "material": "PLA", "vendor": {"name": "Sunlu"}}}
+        cand, _, problem = osp.choose_preset(7, spool, SNAP)
+        self.assertIsNone(cand)
+        self.assertIn("not compatible", problem)
 
-    def test_extra_parent_words_count_against_it(self):
-        systems = SYSTEMS + [system("SUNLU Wood PLA @System", "SUNLU", "PLA"),
-                             system("SUNLU PLA Matte @System", "SUNLU", "PLA")]
-        self.assertEqual(osp.choose_parent("Sunlu", "PLA", "Sunlu Fluorescent PLA", systems)["name"],
-                         "SUNLU PLA+ @System")
-        self.assertEqual(osp.choose_parent("Sunlu", "PLA", "Sunlu PLA Matte", systems)["name"],
-                         "SUNLU PLA Matte @System")
-
-    def test_none_without_a_material_match(self):
-        self.assertIsNone(osp.choose_parent("X", "PEEK", "X PEEK", SYSTEMS))
+    def test_falls_back_to_name_match_then_explains(self):
+        spool = {"filament": {"name": "HS PLA+ White", "material": "PLA", "vendor": {"name": "Sunlu"}}}
+        cand, how, _ = osp.choose_preset(99, spool, SNAP)
+        self.assertEqual(cand["name"], "Sunlu HS PLA+")
+        self.assertIn("no PipSpool", how)
+        cand, _, problem = osp.choose_preset(99, {}, SNAP)        # Spoolman unreachable
+        self.assertIsNone(cand)
+        self.assertIn("Synchronize now", problem)
 
 
-class MissingTest(unittest.TestCase):
-    def test_groups_unmatched_filaments(self):
-        fils = [
-            {"name": "Olive Green", "material": "PLA", "vendor": {"name": "JAYO"},
-             "settings_extruder_temp": 210, "settings_bed_temp": 60, "density": 1.24, "diameter": 1.75},
-            {"name": "Lime", "material": "PLA", "vendor": {"name": "Jayo"}, "settings_extruder_temp": 215},
-            {"name": "HS PLA+ 2.0 Blue", "material": "PLA+", "vendor": {"name": "Sunlu"}},
-            {"name": "Odd", "material": "PLA", "vendor": {"name": "Jayo"}, "extra": {"orca_preset": "\"Sunlu HS PLA+\""}},
-        ]
-        items = osp.missing_presets(fils, CANDIDATES, SYSTEMS)
-        self.assertEqual([i["name"] for i in items], ["JAYO PLA"])
-        self.assertEqual(items[0]["count"], 2)
-        self.assertEqual(items[0]["parent"], "Generic PLA @System")
-        data = osp.preset_json(items[0])
-        self.assertEqual(data["inherits"], "Generic PLA @System")
-        self.assertEqual(data["filament_vendor"], ["JAYO"])
-        self.assertEqual(data["filament_density"], ["1.24"])
-        self.assertIn(data["nozzle_temperature"], (["210"], ["215"]))
-        self.assertEqual(data["hot_plate_temp"], ["60"])
+class FakeMoonraker:
+    def __init__(self, lanes, spools, spoolman_up=True):
+        self.lanes, self.spools, self.up = lanes, spools, spoolman_up
+
+    def lane_data(self):
+        return self.lanes
+
+    def spoolman(self, path):
+        if not self.up:
+            raise RuntimeError("Spoolman: unreachable")
+        return self.spools.get(int(path.rsplit("/", 1)[-1]))
+
+
+class SyncTest(unittest.TestCase):
+    def run_sync(self, moonraker, snap=SNAP):
+        selected, colored = [], []
+        rows = osp.sync_slots(moonraker, snap, select=lambda s, n: selected.append((s, n)),
+                              color=lambda s, c: colored.append((s, c)) or bool(c))
+        return rows, selected, colored
+
+    def test_spooltag_lanes_select_pipspool_profiles(self):
+        lanes = {"T2": {"lane": "2", "spool_id": 42, "material": "PLA", "color": "#1E88E5"},
+                 "T0": {"lane": "0", "material": ""}}
+        rows, selected, colored = self.run_sync(FakeMoonraker(lanes, {42: {"filament": {"name": "Galaxy Blue"}}}))
+        self.assertEqual(selected, [(3, PIP[0]["name"])])
+        self.assertEqual(colored, [(3, "#1E88E5")])
+        self.assertEqual(rows[0]["status"], "Empty lane")
+        self.assertEqual(rows[1]["status"], "Selected (PipSpool), color set")
+
+    def test_works_without_spoolman(self):
+        lanes = {"T1": {"lane": "1", "spool_id": 42, "material": "PLA"}}
+        rows, selected, _ = self.run_sync(FakeMoonraker(lanes, {}, spoolman_up=False))
+        self.assertEqual(selected, [(2, PIP[0]["name"])])
+
+    def test_already_set_and_too_few_slots(self):
+        lanes = {"T0": {"lane": "0", "spool_id": 42}, "T6": {"lane": "6", "spool_id": 42}}
+        snap = dict(SNAP, slots=[PIP[0]["name"]])
+        rows, selected, _ = self.run_sync(FakeMoonraker(lanes, {}), snap)
+        self.assertEqual(selected, [])
+        self.assertTrue(rows[0]["status"].startswith("Already set (PipSpool)"))
+        self.assertIn("only 1 filament slots", rows[1]["status"])
 
 
 class MiscTest(unittest.TestCase):
@@ -175,15 +176,6 @@ class MiscTest(unittest.TestCase):
                                 ("", ""), ("#12345", ""), (None, ""), ("red", "")):
             self.assertEqual(osp.normalize_color(value), expected, value)
 
-    def test_preset_names(self):
-        self.assertTrue(osp.valid_preset_name("Sunlu HS PLA+ 2.0"))
-        for bad in ("", " x", "a/b", "x @C5", ".hidden"):
-            self.assertFalse(osp.valid_preset_name(bad), bad)
-
-    def test_first_config_value(self):
-        self.assertEqual(osp._first('"SUNLU";"X"'), "SUNLU")
-        self.assertEqual(osp._first('""'), "")
-        self.assertEqual(osp._first("PLA"), "PLA")
 
 
 if __name__ == "__main__":
